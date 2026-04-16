@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PPT Generator — Groq + MCP</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800">
+<div class="max-w-4xl mx-auto p-6">
+  <header class="mb-6">
+    <h1 class="text-3xl font-semibold">PPT Generator</h1>
+    <p class="text-slate-600 text-sm">Upload a reference .pptx, pick one, describe your topic — Groq Llama-3.3-70B rewrites every text element for your topic while keeping all visuals, layouts, and slide count from the reference.</p>
+  </header>
+
+  <section class="bg-white rounded-lg shadow p-5 mb-6">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-lg">1. Choose a reference .pptx</h2>
+      <label class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700 cursor-pointer">
+        + Add new
+        <input id="upload-input" type="file" accept=".pptx" class="hidden" />
+      </label>
+    </div>
+    <div id="upload-status" class="text-sm text-slate-500 mb-2 hidden"></div>
+    <div id="templates-list" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-5 mb-6">
+    <h2 class="font-semibold text-lg mb-3">2. Describe your new deck</h2>
+    <textarea id="prompt" rows="5" class="w-full border rounded px-3 py-2 text-sm"
+      placeholder="Example: A 6-slide investor pitch for a fintech startup called 'PayFast'. Cover slide with a strong tagline, problem statement, solution, market size, business model, and a closing call-to-action slide."></textarea>
+    <div class="flex items-center gap-3 mt-3">
+      <button id="generate-btn" class="bg-blue-600 text-white px-5 py-2 rounded hover:bg-blue-700 disabled:bg-slate-400">Generate</button>
+      <div id="gen-status" class="text-sm text-slate-600"></div>
+    </div>
+  </section>
+
+  <section id="result" class="hidden bg-emerald-50 border border-emerald-200 rounded-lg p-5">
+    <h2 class="font-semibold text-lg text-emerald-800 mb-2">Done</h2>
+    <div id="result-meta" class="text-sm text-emerald-900 mb-3"></div>
+    <a id="download-link" href="#" class="inline-block bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700">Download .pptx</a>
+  </section>
+
+  <section id="error" class="hidden bg-red-50 border border-red-200 rounded-lg p-5 mt-4">
+    <h2 class="font-semibold text-lg text-red-800 mb-2">Error</h2>
+    <pre id="error-body" class="text-xs text-red-900 whitespace-pre-wrap"></pre>
+  </section>
+</div>
+
+<script>
+let selectedId = null;
+
+async function loadTemplates() {
+  const r = await fetch('/api/templates');
+  const items = await r.json();
+  const container = document.getElementById('templates-list');
+  container.innerHTML = '';
+  if (!items.length) {
+    container.innerHTML = '<div class="text-sm text-slate-500 col-span-2 py-4 text-center border-2 border-dashed rounded">No references yet — click <b>+ Add new</b> to upload your first .pptx.</div>';
+    return;
+  }
+  for (const it of items) {
+    const card = document.createElement('div');
+    const selected = selectedId === it.id;
+    card.className = 'border rounded p-3 cursor-pointer hover:border-blue-400 ' +
+      (selected ? 'border-blue-500 bg-blue-50' : 'border-slate-200');
+    card.innerHTML = `
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="font-medium text-sm truncate">${it.filename}</div>
+          <div class="text-xs text-slate-500">${(it.size/1024).toFixed(1)} KB</div>
+        </div>
+        <button data-del="${it.id}" class="text-xs text-red-500 hover:text-red-700">delete</button>
+      </div>`;
+    card.onclick = (e) => {
+      if (e.target.dataset.del) return;
+      selectedId = it.id;
+      loadTemplates();
+    };
+    container.appendChild(card);
+  }
+  container.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.del;
+      if (!confirm('Delete this template?')) return;
+      await fetch('/api/templates/' + encodeURIComponent(id), {method: 'DELETE'});
+      if (selectedId === id) selectedId = null;
+      loadTemplates();
+    });
+  });
+}
+
+document.getElementById('upload-input').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const status = document.getElementById('upload-status');
+  status.classList.remove('hidden');
+  status.textContent = 'Uploading ' + f.name + '...';
+  const fd = new FormData();
+  fd.append('file', f);
+  const r = await fetch('/api/upload', {method: 'POST', body: fd});
+  if (!r.ok) { status.textContent = 'Upload failed: ' + await r.text(); return; }
+  const j = await r.json();
+  status.textContent = 'Added: ' + j.filename + ' (auto-selected)';
+  e.target.value = '';
+  selectedId = j.id;
+  await loadTemplates();
+});
+
+document.getElementById('generate-btn').addEventListener('click', async () => {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!selectedId) { alert('Select a reference template first.'); return; }
+  if (prompt.length < 3) { alert('Enter a prompt.'); return; }
+  const btn = document.getElementById('generate-btn');
+  const status = document.getElementById('gen-status');
+  document.getElementById('result').classList.add('hidden');
+  document.getElementById('error').classList.add('hidden');
+  btn.disabled = true;
+  status.textContent = 'Generating... (this can take 30-90s)';
+  const fd = new FormData();
+  fd.append('template_id', selectedId);
+  fd.append('prompt', prompt);
+  try {
+    const r = await fetch('/api/generate', {method: 'POST', body: fd});
+    const j = await r.json();
+    if (!r.ok) {
+      document.getElementById('error').classList.remove('hidden');
+      document.getElementById('error-body').textContent = JSON.stringify(j, null, 2);
+      status.textContent = '';
+      return;
+    }
+    document.getElementById('result').classList.remove('hidden');
+    document.getElementById('result-meta').textContent =
+      `${j.slides} slides preserved. Rewrote ${j.replaced} of ${j.total_entries} text entries.`;
+    document.getElementById('download-link').href = j.download_url;
+    status.textContent = '';
+  } catch (e) {
+    document.getElementById('error').classList.remove('hidden');
+    document.getElementById('error-body').textContent = String(e);
+    status.textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+loadTemplates();
+</script>
+</body>
+</html>
